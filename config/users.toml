@@ -1,0 +1,17 @@
+# 用户配置文件
+# password_hash 使用 argon2id 生成
+# 生成方式: cargo run --bin hash_password -- <password>
+
+[[users]]
+name = "admin"
+# 密码: admin
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$qCUSrj95RmvkYFICcpYbwg$r/V34vKkX5ahu8wNiydctH+ptL3gXEhmkadf+aVF6Ig"
+public_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINCuD+lYfrv6nWQ7z/eR0s8MczxzYvcx4sPsGMR+nlhi your_email@example.com"]
+allowed_hosts = ["*"]
+
+[[users]]
+name = "developer"
+# 密码: developer (需要重新生成: cargo run --bin hash_password -- developer)
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$placeholder"
+public_keys = []
+allowed_hosts = ["web-server-01", "web-server-02"]

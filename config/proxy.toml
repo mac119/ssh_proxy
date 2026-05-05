@@ -1,0 +1,24 @@
+# SSH Proxy 主配置文件
+
+[server]
+listen_address = "0.0.0.0"
+listen_port = 2222
+host_key_path = "config/host_key"
+
+[session]
+# 会话超时时间（秒），0 表示不超时
+idle_timeout_secs = 1800
+# 最大并发会话数
+max_sessions = 100
+
+[audit]
+# 审计日志目录
+log_dir = "logs"
+# 是否记录终端输出（用于回放）
+record_session = true
+
+[security]
+# 最大登录失败次数
+max_auth_attempts = 3
+# 登录失败后锁定时间（秒）
+lockout_duration_secs = 300

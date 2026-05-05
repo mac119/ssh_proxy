@@ -1,0 +1,25 @@
+# 目标主机配置文件
+
+[[hosts]]
+name = "web-server-01"
+address = "192.168.1.10"
+port = 22
+username = "deploy"
+auth_method = "key"
+private_key_path = "config/keys/web-server-01"
+
+[[hosts]]
+name = "web-server-02"
+address = "192.168.1.11"
+port = 22
+username = "deploy"
+auth_method = "key"
+private_key_path = "config/keys/web-server-02"
+
+[[hosts]]
+name = "db-server-01"
+address = "192.168.1.12"
+port = 22
+username = "ubuntu"
+auth_method = "password"
+password = "password"
