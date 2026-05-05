@@ -8,6 +8,22 @@ name = "admin"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$qCUSrj95RmvkYFICcpYbwg$r/V34vKkX5ahu8wNiydctH+ptL3gXEhmkadf+aVF6Ig"
 public_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINCuD+lYfrv6nWQ7z/eR0s8MczxzYvcx4sPsGMR+nlhi your_email@example.com"]
 allowed_hosts = ["*"]
+# Blacklist mode: block dangerous commands
+command_filter_mode = "blacklist"
+blocked_commands = [
+    "rm -rf /",
+    "rm -rf /*",
+    "mkfs",
+    "dd if=",
+    ":(){ :|:& };:",
+    "shutdown",
+    "reboot",
+    "init 0",
+    "init 6",
+    "halt",
+    "poweroff",
+]
+allowed_commands = []
 
 [[users]]
 name = "developer"
@@ -15,3 +31,21 @@ name = "developer"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$placeholder"
 public_keys = []
 allowed_hosts = ["web-server-01", "web-server-02"]
+# Whitelist mode: only allow safe commands
+command_filter_mode = "whitelist"
+blocked_commands = []
+allowed_commands = [
+    "ls", "ll", "la",
+    "cat", "head", "tail", "less", "more",
+    "grep", "find", "wc",
+    "ps", "top", "htop",
+    "df", "du", "free",
+    "uptime", "whoami", "hostname", "date",
+    "cd", "pwd", "echo",
+    "curl", "wget",
+    "docker", "kubectl",
+    "git", "npm", "yarn", "cargo",
+    "systemctl status",
+    "journalctl",
+    "tail",
+]

@@ -380,7 +380,7 @@ ssh_proxy/
 - [ ] Web management UI (live sessions, replay, user management)
 - [ ] Database backend (PostgreSQL/SQLite for config & logs)
 - [ ] Multi-factor authentication (TOTP/WebAuthn)
-- [ ] Command blacklist/whitelist filtering
+- [x] Command blacklist/whitelist filtering
 - [ ] SCP/SFTP file transfer auditing
 - [ ] Cluster mode with load balancing
 - [ ] Real-time alerting (Slack/webhook on suspicious activity)

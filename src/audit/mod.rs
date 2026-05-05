@@ -49,6 +49,14 @@ pub enum AuditEvent {
         data_base64: String,
         data_len: usize,
     },
+    #[serde(rename = "command_blocked")]
+    CommandBlocked {
+        timestamp: String,
+        session_id: String,
+        user: String,
+        command: String,
+        reason: String,
+    },
 }
 
 /// 审计日志记录器
@@ -153,6 +161,18 @@ impl AuditLogger {
             direction: direction.to_string(),
             data_base64,
             data_len: data.len(),
+        };
+        self.write_event(&event);
+    }
+
+    /// 记录命令被拦截
+    pub fn log_command_blocked(&self, session_id: &str, user: &str, command: &str, reason: &str) {
+        let event = AuditEvent::CommandBlocked {
+            timestamp: Utc::now().to_rfc3339(),
+            session_id: session_id.to_string(),
+            user: user.to_string(),
+            command: command.to_string(),
+            reason: reason.to_string(),
         };
         self.write_event(&event);
     }

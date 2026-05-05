@@ -9,6 +9,7 @@ use crate::audit::AuditLogger;
 use crate::auth::Authenticator;
 use crate::client::SshClient;
 use crate::config::AppConfig;
+use crate::filter::{CommandFilter, FilterAction};
 use crate::session::{ProxySession, SessionManager};
 
 /// 每个客户端连接的处理器
@@ -26,8 +27,14 @@ pub struct ProxyHandler {
     connected_to_target: bool,
     /// 目标主机选择阶段的输入缓冲
     input_buffer: String,
+    /// 命令行缓冲（用于命令过滤）
+    command_buffer: String,
     /// 用户 channel ID（用于后台转发任务）
     user_channel_id: Option<ChannelId>,
+    /// 命令过滤器
+    command_filter: Option<CommandFilter>,
+    /// 是否处于交互模式（vi/nano等），暂停过滤
+    interactive_mode: bool,
 }
 
 impl ProxyHandler {
@@ -48,7 +55,35 @@ impl ProxyHandler {
             proxy_session: None,
             connected_to_target: false,
             input_buffer: String::new(),
+            command_buffer: String::new(),
             user_channel_id: None,
+            command_filter: None,
+            interactive_mode: false,
+        }
+    }
+
+    /// 初始化命令过滤器（认证成功后调用）
+    fn init_command_filter(&mut self, username: &str) {
+        if let Some(user) = self.app_config.users.iter().find(|u| u.name == username) {
+            let filter = CommandFilter::from_user_config(user);
+            if filter.is_enabled() {
+                info!(
+                    "Command filter enabled for user '{}': mode={}",
+                    username, user.command_filter_mode
+                );
+            }
+            self.command_filter = Some(filter);
+        }
+    }
+
+    /// 检测是否进入/退出交互模式的命令
+    fn check_interactive_command(&mut self, cmd: &str) {
+        let cmd_name = cmd.trim().split_whitespace().next().unwrap_or("");
+        let interactive_commands = ["vi", "vim", "nvim", "nano", "emacs", "less", "more", "top", "htop", "man"];
+
+        if interactive_commands.iter().any(|&ic| cmd_name == ic) {
+            self.interactive_mode = true;
+            info!("Entering interactive mode (command: {})", cmd_name);
         }
     }
 
@@ -179,6 +214,136 @@ impl ProxyHandler {
             }
         }
     }
+
+    /// 处理已连接状态下的数据（含命令过滤）
+    async fn handle_connected_data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) {
+        // 检查是否有命令过滤器且不处于交互模式
+        let should_filter = self.command_filter.as_ref()
+            .map(|f| f.is_enabled())
+            .unwrap_or(false) && !self.interactive_mode;
+
+        if !should_filter {
+            // 不需要过滤，直接转发
+            self.forward_data_to_target(data, channel, session).await;
+            return;
+        }
+
+        // 需要命令过滤：逐字节处理
+        for &byte in data {
+            match byte {
+                b'\r' | b'\n' => {
+                    // 用户按下回车，检查命令
+                    let command = self.command_buffer.clone();
+                    self.command_buffer.clear();
+
+                    if command.trim().is_empty() {
+                        // 空命令，直接转发回车
+                        self.forward_data_to_target(&[byte], channel, session).await;
+                        continue;
+                    }
+
+                    // 检查命令是否允许
+                    let action = self.command_filter.as_ref()
+                        .map(|f| f.check_command(&command))
+                        .unwrap_or(FilterAction::Allow);
+
+                    match action {
+                        FilterAction::Allow => {
+                            // 检查是否是交互式命令
+                            self.check_interactive_command(&command);
+
+                            // 命令允许，转发整个命令行 + 回车
+                            // 注意：命令已经在用户输入时逐字节回显并转发了
+                            // 这里只需要转发回车
+                            self.forward_data_to_target(&[byte], channel, session).await;
+                        }
+                        FilterAction::Block(reason) => {
+                            // 命令被拦截
+                            let username = self.username.as_deref().unwrap_or("unknown");
+                            warn!(
+                                "Command BLOCKED for user '{}': '{}'",
+                                username, command
+                            );
+
+                            // 记录到审计日志
+                            if let Some(proxy_session) = &self.proxy_session {
+                                let ps = proxy_session.lock().await;
+                                self.audit_logger.log_command_blocked(
+                                    ps.session_id(),
+                                    username,
+                                    &command,
+                                    &reason,
+                                );
+                            }
+
+                            // 发送拒绝消息给用户（模拟 shell 输出）
+                            let block_msg = format!(
+                                "\r\n\x1b[1;31m⛔ BLOCKED:\x1b[0m {}\r\n",
+                                reason
+                            );
+                            session.data(channel, CryptoVec::from(block_msg.as_bytes().to_vec()));
+
+                            // 发送一个新的提示符（模拟回到 shell）
+                            // 通过发送 Ctrl+C 到目标主机来取消当前行
+                            self.forward_data_to_target(b"\x03", channel, session).await;
+                        }
+                    }
+                }
+                // Ctrl+C: 清空命令缓冲并直接转发
+                3 => {
+                    self.command_buffer.clear();
+                    // 如果在交互模式下退出
+                    if self.interactive_mode {
+                        self.interactive_mode = false;
+                    }
+                    self.forward_data_to_target(&[byte], channel, session).await;
+                }
+                // Backspace / DEL
+                127 | 8 => {
+                    self.command_buffer.pop();
+                    self.forward_data_to_target(&[byte], channel, session).await;
+                }
+                // Escape sequences (arrow keys etc.) - pass through but don't add to buffer
+                27 => {
+                    self.forward_data_to_target(&[byte], channel, session).await;
+                }
+                // Regular character
+                _ => {
+                    // Only add printable ASCII to command buffer
+                    if byte >= 32 && byte < 127 {
+                        self.command_buffer.push(byte as char);
+                    }
+                    self.forward_data_to_target(&[byte], channel, session).await;
+                }
+            }
+        }
+    }
+
+    /// 转发数据到目标主机
+    async fn forward_data_to_target(
+        &self,
+        data: &[u8],
+        channel: ChannelId,
+        session: &mut Session,
+    ) {
+        if let Some(proxy_session) = &self.proxy_session {
+            let ps = proxy_session.lock().await;
+            // 记录输入到审计日志
+            ps.record_input(data);
+            // 转发到目标主机
+            if let Err(e) = ps.send_data(data).await {
+                error!("Failed to forward data to target: {}", e);
+                let msg = format!("\r\nConnection to target lost: {}\r\n", e);
+                session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
+                session.close(channel);
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -196,6 +361,7 @@ impl Handler for ProxyHandler {
         if self.authenticator.verify_password(user, password) {
             info!("User '{}' authenticated successfully", user);
             self.username = Some(user.to_string());
+            self.init_command_filter(user);
             self.audit_logger.log_auth_success(user, &self.peer_addr, "password");
             Ok(Auth::Accept)
         } else {
@@ -219,6 +385,7 @@ impl Handler for ProxyHandler {
         if self.authenticator.verify_public_key(user, &key_str) {
             info!("User '{}' authenticated via public key", user);
             self.username = Some(user.to_string());
+            self.init_command_filter(user);
             self.audit_logger.log_auth_success(user, &self.peer_addr, "publickey");
             Ok(Auth::Accept)
         } else {
@@ -280,19 +447,8 @@ impl Handler for ProxyHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if self.connected_to_target {
-            // 已连接目标主机，转发数据到目标
-            if let Some(proxy_session) = &self.proxy_session {
-                let ps = proxy_session.lock().await;
-                // 记录输入到审计日志
-                ps.record_input(data);
-                // 转发到目标主机
-                if let Err(e) = ps.send_data(data).await {
-                    error!("Failed to forward data to target: {}", e);
-                    let msg = format!("\r\nConnection to target lost: {}\r\n", e);
-                    session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
-                    session.close(channel);
-                }
-            }
+            // 已连接目标主机，使用命令过滤逻辑
+            self.handle_connected_data(channel, data, session).await;
         } else {
             // 主机选择阶段：收集用户输入
             for &byte in data {

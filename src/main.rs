@@ -8,6 +8,7 @@ mod audit;
 mod auth;
 mod client;
 mod config;
+mod filter;
 mod server;
 mod session;
 

@@ -48,6 +48,19 @@ pub struct UserEntry {
     pub password_hash: String,
     pub public_keys: Vec<String>,
     pub allowed_hosts: Vec<String>,
+    /// Command filter mode: "blacklist", "whitelist", or "none" (default)
+    #[serde(default = "default_filter_mode")]
+    pub command_filter_mode: String,
+    /// Commands blocked in blacklist mode (substring match)
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
+    /// Commands allowed in whitelist mode (prefix match on command name)
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+}
+
+fn default_filter_mode() -> String {
+    "none".to_string()
 }
 
 /// 主机配置
