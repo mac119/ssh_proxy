@@ -141,6 +141,14 @@ impl SshClient {
         Ok(())
     }
 
+    /// 发送 EOF/关闭信号到目标主机（通过 disconnect）
+    pub async fn send_eof(&self) -> Result<()> {
+        self.session
+            .disconnect(russh::Disconnect::ByApplication, "Transfer complete", "en")
+            .await?;
+        Ok(())
+    }
+
     /// 连接到目标主机并执行命令（用于 SCP/exec 模式，无 PTY）
     pub async fn connect_exec(host: &HostEntry, command: &str) -> Result<(Self, DataReceiver)> {
         let config = Arc::new(client::Config::default());

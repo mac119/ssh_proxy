@@ -786,12 +786,42 @@ impl Handler for ProxyHandler {
             let ps = proxy_session.lock().await;
             let session_id = ps.session_id().to_string();
 
+            // 关闭到目标主机的连接
+            let _ = ps.close().await;
+
             // 记录会话结束
             self.audit_logger.log_session_end(&session_id);
 
             // 移除会话
             let mut sm = self.session_manager.lock().await;
             sm.remove_session(&session_id);
+        }
+
+        Ok(())
+    }
+
+    /// 处理 channel EOF（客户端不再发送数据）
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        info!("Channel EOF from user '{:?}' (exec_mode={})", self.username, self.is_exec_mode);
+
+        if self.is_exec_mode {
+            // SCP/SFTP 传输完成，发送 EOF 到目标并关闭 channel
+            if let Some(proxy_session) = &self.proxy_session {
+                let ps = proxy_session.lock().await;
+                let _ = ps.send_eof().await;
+            }
+
+            // 短暂等待让目标主机的最后响应传回
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            // 关闭用户 channel
+            session.channel_success(channel);
+            session.eof(channel);
+            session.close(channel);
         }
 
         Ok(())

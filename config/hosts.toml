@@ -18,8 +18,8 @@ private_key_path = "config/keys/web-server-02"
 
 [[hosts]]
 name = "db-server-01"
-address = "192.168.1.12"
+address = "43.163.110.244"
 port = 22
 username = "ubuntu"
 auth_method = "password"
-password = "password"
+password = ""

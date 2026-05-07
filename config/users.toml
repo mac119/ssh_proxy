@@ -7,7 +7,7 @@ name = "admin"
 # 密码: admin
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$qCUSrj95RmvkYFICcpYbwg$r/V34vKkX5ahu8wNiydctH+ptL3gXEhmkadf+aVF6Ig"
 public_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINCuD+lYfrv6nWQ7z/eR0s8MczxzYvcx4sPsGMR+nlhi your_email@example.com"]
-allowed_hosts = ["*"]
+allowed_hosts = ["db-server-01"]
 # Blacklist mode: block dangerous commands
 command_filter_mode = "blacklist"
 blocked_commands = [

@@ -127,6 +127,11 @@ impl ProxySession {
         self.client.send_data(data).await
     }
 
+    /// 发送 EOF 到目标主机
+    pub async fn send_eof(&self) -> anyhow::Result<()> {
+        self.client.send_eof().await
+    }
+
     /// 关闭会话
     pub async fn close(&self) -> anyhow::Result<()> {
         self.client.close().await
