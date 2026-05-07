@@ -215,6 +215,80 @@ impl SshClient {
         ))
     }
 
+    /// 连接到目标主机并启动 SFTP subsystem
+    pub async fn connect_sftp(host: &HostEntry) -> Result<(Self, DataReceiver)> {
+        let config = Arc::new(client::Config::default());
+        let (data_tx, data_rx) = mpsc::unbounded_channel();
+        let handler = ClientHandler { data_tx };
+
+        let addr = format!("{}:{}", host.address, host.port);
+        info!("Connecting to target host (sftp mode): {}", addr);
+
+        let mut session = client::connect(config, &addr, handler)
+            .await
+            .context(format!("Failed to connect to {}", addr))?;
+
+        // 认证
+        match host.auth_method.as_str() {
+            "key" => {
+                let key_path = host
+                    .private_key_path
+                    .as_deref()
+                    .context("Private key path not configured")?;
+                let key = russh_keys::load_secret_key(key_path, None)
+                    .context("Failed to load private key")?;
+                let auth_result = session
+                    .authenticate_publickey(&host.username, Arc::new(key))
+                    .await
+                    .context("Public key authentication failed")?;
+                if !auth_result {
+                    anyhow::bail!("Public key authentication rejected by target host");
+                }
+            }
+            "password" => {
+                let password = host
+                    .password
+                    .as_deref()
+                    .context("Password not configured for host")?;
+                let pwd = password.strip_prefix("encrypted:").unwrap_or(password);
+                let auth_result = session
+                    .authenticate_password(&host.username, pwd)
+                    .await
+                    .context("Password authentication failed")?;
+                if !auth_result {
+                    anyhow::bail!("Password authentication rejected by target host");
+                }
+            }
+            other => {
+                anyhow::bail!("Unsupported auth method: {}", other);
+            }
+        }
+
+        info!("Authenticated to target host (sftp): {}", addr);
+
+        // 打开 channel 并请求 sftp subsystem
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("Failed to open channel")?;
+
+        let channel_id = channel.id();
+
+        // 请求 sftp subsystem
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .context("Failed to request sftp subsystem")?;
+
+        Ok((
+            Self {
+                session,
+                channel_id,
+            },
+            data_rx,
+        ))
+    }
+
     /// 关闭连接
     pub async fn close(&self) -> Result<()> {
         self.session

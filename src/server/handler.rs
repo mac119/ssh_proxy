@@ -609,6 +609,92 @@ impl Handler for ProxyHandler {
         Ok(())
     }
 
+    /// 处理 subsystem 请求（SFTP 走这里）
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let username = self.username.as_deref().unwrap_or("unknown").to_string();
+        info!("Subsystem request from user '{}': {}", username, name);
+
+        if name == "sftp" {
+            // 确定目标主机
+            let target_host = self.resolve_target_host_for_exec(&username);
+
+            match target_host {
+                Some(host) => {
+                    let session_id = uuid::Uuid::new_v4().to_string();
+
+                    self.audit_logger.log_scp_session_start(
+                        &session_id,
+                        &username,
+                        &self.peer_addr,
+                        &host.name,
+                        "sftp",
+                        "",
+                    );
+
+                    session.request_success();
+                    self.is_exec_mode = true;
+
+                    // 连接到目标主机并请求 sftp subsystem
+                    // 使用 exec 模式执行 "sftp-server" 或通过 subsystem
+                    match SshClient::connect_sftp(&host).await {
+                        Ok((client, mut data_rx)) => {
+                            info!("SFTP connection established to {}", host.name);
+
+                            let proxy_session = ProxySession::new(
+                                session_id.clone(),
+                                username.clone(),
+                                host.name.clone(),
+                                client,
+                                self.audit_logger.clone(),
+                            );
+                            let proxy_session = Arc::new(Mutex::new(proxy_session));
+                            self.proxy_session = Some(proxy_session);
+                            self.connected_to_target = true;
+
+                            // 启动后台任务：从目标主机读取 SFTP 数据并转发给用户
+                            let server_handle = session.handle();
+                            let audit_logger = self.audit_logger.clone();
+                            let sid = session_id.clone();
+
+                            tokio::spawn(async move {
+                                while let Some(data) = data_rx.recv().await {
+                                    audit_logger.log_data(&sid, "sftp_output", &data);
+                                    if let Err(e) = server_handle
+                                        .data(channel, CryptoVec::from(data))
+                                        .await
+                                    {
+                                        error!("Failed to send SFTP data to user: {:?}", e);
+                                        break;
+                                    }
+                                }
+                                info!("SFTP forwarding ended for session {}", sid);
+                                audit_logger.log_session_end(&sid);
+                            });
+                        }
+                        Err(e) => {
+                            error!("Failed to connect to {} for SFTP: {}", host.name, e);
+                            session.close(channel);
+                        }
+                    }
+                }
+                None => {
+                    warn!("No target host resolved for SFTP from user '{}'", username);
+                    session.close(channel);
+                }
+            }
+        } else {
+            warn!("Unsupported subsystem '{}' from user '{}'", name, username);
+            session.close(channel);
+        }
+
+        Ok(())
+    }
+
     /// 处理客户端发送的数据
     async fn data(
         &mut self,
