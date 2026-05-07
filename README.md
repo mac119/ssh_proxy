@@ -93,17 +93,34 @@ Developer → SSH Guard Proxy → Target Server
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### Installation
 
-- **Rust** 1.70+ (install via [rustup](https://rustup.rs/))
-- Target servers accessible via SSH from the proxy host
+#### Option 1: Download Pre-built Binary (Recommended)
 
-### Build
+Download the latest release from the [Releases page](https://github.com/mac119/ssh_proxy/releases):
+
+```bash
+# Download and extract (example for macOS arm64)
+curl -L https://github.com/mac119/ssh_proxy/releases/download/v0.1.0/ssh-guard-proxy-v0.1.0-darwin-arm64.tar.gz | tar xz
+
+# Or manually download, extract, and set permissions
+chmod +x ssh_proxy hash_password
+```
+
+The release package includes:
+- `ssh_proxy` — Main proxy binary
+- `hash_password` — Password hash generator tool
+- `config/` — Configuration templates
+
+#### Option 2: Build from Source
+
+Requires **Rust 1.70+** (install via [rustup](https://rustup.rs/)):
 
 ```bash
 git clone https://github.com/mac119/ssh_proxy.git
 cd ssh_proxy
 cargo build --release
+# Binaries at: target/release/ssh_proxy, target/release/hash_password
 ```
 
 ### Configure
@@ -134,7 +151,7 @@ lockout_duration_secs = 300
 Generate a password hash first:
 
 ```bash
-cargo run --bin hash_password -- 'YourSecurePassword'
+./hash_password 'YourSecurePassword'
 # Output: $argon2id$v=19$m=19456,t=2,p=1$...
 ```
 
@@ -177,12 +194,21 @@ password = "encrypted:your_password_here"
 ### Run
 
 ```bash
-# Development
-cargo run
+# Foreground (for testing)
+./ssh_proxy
 
-# Production
-./target/release/ssh_proxy
+# Background with nohup
+nohup ./ssh_proxy > /var/log/ssh_proxy.log 2>&1 &
+
+# Background with output to file (recommended for debugging)
+./ssh_proxy >> logs/proxy.log 2>&1 &
+echo $! > ssh_proxy.pid   # Save PID for later stop
+
+# Stop the proxy
+kill $(cat ssh_proxy.pid)
 ```
+
+> **Note**: In production, use **systemd** (see [Production Deployment](#-production-deployment) below) for auto-restart, log management, and proper signal handling.
 
 ### Connect
 
