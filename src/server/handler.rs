@@ -10,6 +10,7 @@ use crate::auth::Authenticator;
 use crate::client::SshClient;
 use crate::config::AppConfig;
 use crate::filter::{CommandFilter, FilterAction};
+use crate::scp::{self, ScpParser};
 use crate::session::{ProxySession, SessionManager};
 
 /// 每个客户端连接的处理器
@@ -35,6 +36,10 @@ pub struct ProxyHandler {
     command_filter: Option<CommandFilter>,
     /// 是否处于交互模式（vi/nano等），暂停过滤
     interactive_mode: bool,
+    /// SCP 解析器（当检测到 SCP 传输时）
+    scp_parser: Option<Arc<Mutex<ScpParser>>>,
+    /// 是否为 SCP/exec 模式的连接（非交互式）
+    is_exec_mode: bool,
 }
 
 impl ProxyHandler {
@@ -59,6 +64,8 @@ impl ProxyHandler {
             user_channel_id: None,
             command_filter: None,
             interactive_mode: false,
+            scp_parser: None,
+            is_exec_mode: false,
         }
     }
 
@@ -344,6 +351,38 @@ impl ProxyHandler {
             }
         }
     }
+
+    /// 为 exec/SCP 模式解析目标主机
+    /// 策略：使用用户允许列表中的第一个主机（后续可通过用户名格式指定）
+    fn resolve_target_host_for_exec(&self, username: &str) -> Option<crate::config::HostEntry> {
+        let allowed_hosts = self.authenticator.get_allowed_hosts(username);
+
+        // 检查用户名是否包含目标主机标识（格式: user%hostname）
+        // 例如: admin%db-server-01
+        let target_name = if let Some(user) = &self.username {
+            if let Some((_user_part, host_part)) = user.split_once('%') {
+                Some(host_part.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(target) = target_name {
+            // 查找指定的目标主机
+            self.app_config.hosts.iter().find(|h| {
+                h.name == target
+                    && (allowed_hosts.contains(&"*".to_string())
+                        || allowed_hosts.contains(&h.name))
+            }).cloned()
+        } else {
+            // 默认使用第一个允许的主机
+            self.app_config.hosts.iter().find(|h| {
+                allowed_hosts.contains(&"*".to_string()) || allowed_hosts.contains(&h.name)
+            }).cloned()
+        }
+    }
 }
 
 #[async_trait]
@@ -439,6 +478,137 @@ impl Handler for ProxyHandler {
         Ok(())
     }
 
+    /// 处理 exec 请求（SCP 和其他远程命令走这里）
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(data).to_string();
+        let username = self.username.as_deref().unwrap_or("unknown").to_string();
+
+        info!("Exec request from user '{}': {}", username, command);
+
+        // 检查是否是 SCP 命令
+        if let Some(scp_cmd) = scp::parse_scp_command(&command) {
+            info!(
+                "SCP transfer detected: user='{}', direction={}, path='{}', recursive={}",
+                username, scp_cmd.direction, scp_cmd.remote_path, scp_cmd.recursive
+            );
+
+            // 确定目标主机（使用用户允许的第一个主机，或通过配置指定）
+            let target_host = self.resolve_target_host_for_exec(&username);
+
+            match target_host {
+                Some(host) => {
+                    let session_id = uuid::Uuid::new_v4().to_string();
+
+                    // 记录 SCP 会话开始
+                    self.audit_logger.log_scp_session_start(
+                        &session_id,
+                        &username,
+                        &self.peer_addr,
+                        &host.name,
+                        &scp_cmd.direction.to_string(),
+                        &scp_cmd.remote_path,
+                    );
+
+                    session.request_success();
+                    self.is_exec_mode = true;
+
+                    // 创建 SCP 解析器
+                    let parser = ScpParser::new(&scp_cmd);
+                    let parser = Arc::new(Mutex::new(parser));
+                    self.scp_parser = Some(parser.clone());
+
+                    // 连接到目标主机（exec 模式）
+                    match SshClient::connect_exec(&host, &command).await {
+                        Ok((client, mut data_rx)) => {
+                            info!("SCP connection established to {}", host.name);
+
+                            // 创建简化的代理会话
+                            let proxy_session = ProxySession::new(
+                                session_id.clone(),
+                                username.clone(),
+                                host.name.clone(),
+                                client,
+                                self.audit_logger.clone(),
+                            );
+                            let proxy_session = Arc::new(Mutex::new(proxy_session));
+                            self.proxy_session = Some(proxy_session);
+                            self.connected_to_target = true;
+
+                            // 启动后台任务：从目标主机读取数据并转发给用户
+                            // 对于 SCP download，解析从目标主机来的数据流
+                            let server_handle = session.handle();
+                            let audit_logger = self.audit_logger.clone();
+                            let sid = session_id.clone();
+                            let scp_parser_clone = parser.clone();
+                            let scp_direction = scp_cmd.direction.clone();
+                            let user_clone = username.clone();
+
+                            tokio::spawn(async move {
+                                while let Some(data) = data_rx.recv().await {
+                                    // 如果是下载方向，解析目标主机发来的数据
+                                    if scp_direction == scp::ScpDirection::Download {
+                                        let mut p = scp_parser_clone.lock().await;
+                                        let new_files = p.parse_data(&data);
+                                        for file in new_files {
+                                            info!(
+                                                "SCP download file: {} ({} bytes)",
+                                                file.filename, file.size
+                                            );
+                                            audit_logger.log_scp_file_transfer(
+                                                &sid,
+                                                &user_clone,
+                                                &file.direction.to_string(),
+                                                &file.filename,
+                                                file.size,
+                                                &file.mode,
+                                            );
+                                        }
+                                    }
+
+                                    // 转发数据给用户
+                                    if let Err(e) = server_handle
+                                        .data(channel, CryptoVec::from(data))
+                                        .await
+                                    {
+                                        error!("Failed to send data to user: {:?}", e);
+                                        break;
+                                    }
+                                }
+                                info!("SCP data forwarding ended for session {}", sid);
+                                audit_logger.log_session_end(&sid);
+                            });
+                        }
+                        Err(e) => {
+                            error!("Failed to connect to {} for SCP: {}", host.name, e);
+                            session.close(channel);
+                        }
+                    }
+                }
+                None => {
+                    warn!("No target host resolved for SCP exec from user '{}'", username);
+                    let msg = b"Error: No target host configured for SCP transfer.\n";
+                    session.data(channel, CryptoVec::from(msg.to_vec()));
+                    session.close(channel);
+                }
+            }
+        } else {
+            // 非 SCP 的 exec 命令 — 可以选择拒绝或转发
+            warn!("Non-SCP exec request from '{}': {}", username, command);
+            let msg = format!(
+                "Error: Direct exec commands are not supported. Use interactive shell.\n"
+            );
+            session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
+            session.close(channel);
+        }
+
+        Ok(())
+    }
+
     /// 处理客户端发送的数据
     async fn data(
         &mut self,
@@ -447,8 +617,44 @@ impl Handler for ProxyHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if self.connected_to_target {
-            // 已连接目标主机，使用命令过滤逻辑
-            self.handle_connected_data(channel, data, session).await;
+            if self.is_exec_mode {
+                // SCP/exec 模式：直接转发，但对上传方向做解析
+                if let Some(scp_parser) = &self.scp_parser {
+                    let mut parser = scp_parser.lock().await;
+                    if parser.direction == scp::ScpDirection::Upload {
+                        let new_files = parser.parse_data(data);
+                        let session_id = if let Some(ps) = &self.proxy_session {
+                            let ps = ps.lock().await;
+                            ps.session_id().to_string()
+                        } else {
+                            String::new()
+                        };
+                        let username = self.username.as_deref().unwrap_or("unknown");
+
+                        for file in new_files {
+                            info!(
+                                "SCP upload file: {} ({} bytes)",
+                                file.filename, file.size
+                            );
+                            self.audit_logger.log_scp_file_transfer(
+                                &session_id,
+                                username,
+                                &file.direction.to_string(),
+                                &file.filename,
+                                file.size,
+                                &file.mode,
+                            );
+                        }
+                    }
+                    drop(parser);
+                }
+
+                // 转发数据到目标主机
+                self.forward_data_to_target(data, channel, session).await;
+            } else {
+                // 交互式 shell 模式：使用命令过滤逻辑
+                self.handle_connected_data(channel, data, session).await;
+            }
         } else {
             // 主机选择阶段：收集用户输入
             for &byte in data {

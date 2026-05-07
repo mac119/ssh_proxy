@@ -381,7 +381,7 @@ ssh_proxy/
 - [ ] Database backend (PostgreSQL/SQLite for config & logs)
 - [ ] Multi-factor authentication (TOTP/WebAuthn)
 - [x] Command blacklist/whitelist filtering
-- [ ] SCP/SFTP file transfer auditing
+- [x] SCP/SFTP file transfer auditing
 - [ ] Cluster mode with load balancing
 - [ ] Real-time alerting (Slack/webhook on suspicious activity)
 - [ ] Session sharing (multiple admins watching one session)

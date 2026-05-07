@@ -57,6 +57,26 @@ pub enum AuditEvent {
         command: String,
         reason: String,
     },
+    #[serde(rename = "scp_session_start")]
+    ScpSessionStart {
+        timestamp: String,
+        session_id: String,
+        user: String,
+        peer_addr: String,
+        target_host: String,
+        direction: String,
+        remote_path: String,
+    },
+    #[serde(rename = "scp_file_transfer")]
+    ScpFileTransfer {
+        timestamp: String,
+        session_id: String,
+        user: String,
+        direction: String,
+        filename: String,
+        size: u64,
+        mode: String,
+    },
 }
 
 /// 审计日志记录器
@@ -173,6 +193,50 @@ impl AuditLogger {
             user: user.to_string(),
             command: command.to_string(),
             reason: reason.to_string(),
+        };
+        self.write_event(&event);
+    }
+
+    /// 记录 SCP 会话开始
+    pub fn log_scp_session_start(
+        &self,
+        session_id: &str,
+        user: &str,
+        peer_addr: &str,
+        target_host: &str,
+        direction: &str,
+        remote_path: &str,
+    ) {
+        let event = AuditEvent::ScpSessionStart {
+            timestamp: Utc::now().to_rfc3339(),
+            session_id: session_id.to_string(),
+            user: user.to_string(),
+            peer_addr: peer_addr.to_string(),
+            target_host: target_host.to_string(),
+            direction: direction.to_string(),
+            remote_path: remote_path.to_string(),
+        };
+        self.write_event(&event);
+    }
+
+    /// 记录 SCP 文件传输
+    pub fn log_scp_file_transfer(
+        &self,
+        session_id: &str,
+        user: &str,
+        direction: &str,
+        filename: &str,
+        size: u64,
+        mode: &str,
+    ) {
+        let event = AuditEvent::ScpFileTransfer {
+            timestamp: Utc::now().to_rfc3339(),
+            session_id: session_id.to_string(),
+            user: user.to_string(),
+            direction: direction.to_string(),
+            filename: filename.to_string(),
+            size,
+            mode: mode.to_string(),
         };
         self.write_event(&event);
     }
