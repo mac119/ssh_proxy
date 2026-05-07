@@ -204,6 +204,61 @@ Select host number:
 
 Select a host and you're in — fully transparent, fully audited.
 
+### File Transfer (SCP/SFTP)
+
+SSH Guard Proxy supports **SCP and SFTP file transfers** with full audit logging. All file transfers are recorded — including filenames, sizes, direction, and timestamps.
+
+#### Upload a File
+
+```bash
+# Upload to the default target host (first allowed host)
+scp -P 2222 myfile.txt admin@proxy-host:/tmp/
+
+# Upload to a specific target host (use user%host format)
+scp -P 2222 myfile.txt admin%db-server-01@proxy-host:/tmp/
+
+# Recursive directory upload
+scp -r -P 2222 ./my-folder admin%web-server-01@proxy-host:/opt/
+```
+
+#### Download a File
+
+```bash
+# Download from the default target host
+scp -P 2222 admin@proxy-host:/etc/hosts ./
+
+# Download from a specific target host
+scp -P 2222 admin%db-server-01@proxy-host:/var/log/app.log ./
+```
+
+#### Legacy SCP Mode
+
+Modern OpenSSH (9.0+) uses SFTP by default for `scp` commands. Both modes are fully supported:
+
+```bash
+# Default (SFTP mode) — works out of the box
+scp -P 2222 file.txt admin@proxy-host:/tmp/
+
+# Force legacy SCP protocol (if needed)
+scp -O -P 2222 file.txt admin@proxy-host:/tmp/
+```
+
+#### Target Host Selection
+
+| Method | Example | Description |
+|--------|---------|-------------|
+| Default | `admin@proxy` | Uses the first allowed host from ACL |
+| Explicit | `admin%db-server-01@proxy` | Specifies exact target host by name |
+
+#### SCP Audit Log Events
+
+All file transfers generate audit entries:
+
+```json
+{"event":"scp_session_start","session_id":"...","user":"admin","direction":"upload","target_host":"db-server-01","remote_path":"/tmp/"}
+{"event":"scp_file_transfer","session_id":"...","user":"admin","direction":"upload","filename":"myfile.txt","size":10240,"mode":"0644"}
+```
+
 ---
 
 ## 📊 Audit Logs
@@ -220,6 +275,9 @@ All audit data is stored in `logs/audit.jsonl` in append-only JSON Lines format.
 | `session_end` | Session terminated |
 | `data` (input) | User keystrokes / commands |
 | `data` (output) | Server responses |
+| `command_blocked` | Command rejected by filter |
+| `scp_session_start` | SCP/SFTP transfer session initiated |
+| `scp_file_transfer` | File transferred (name, size, direction) |
 
 ### Example Log Entries
 
