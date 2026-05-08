@@ -55,6 +55,9 @@ Developer → SSH Guard Proxy → Target Server
 | 🎛️ **Access Control (ACL)** | Per-user host access policies — who can access what |
 | 📝 **Full Audit Logging** | Every input/output recorded in JSON Lines format |
 | 🎬 **Session Recording** | Asciicast v2 format — replay any session with `asciinema` |
+| 🚫 **Command Filtering** | Blacklist/whitelist mode — block dangerous commands in real-time |
+| 📂 **SCP/SFTP Auditing** | Full file transfer logging with filenames, sizes, and direction |
+| 👁️ **Session Sharing** | Multiple admins can watch a live session in real-time (read-only) |
 | ⚡ **High Performance** | Built on Rust + Tokio async runtime — minimal overhead |
 | 🏗️ **Zero Target Changes** | No agent or modification needed on target servers |
 | 🔑 **Host Key Auto-generation** | Ed25519 host keys generated on first run |
@@ -287,6 +290,50 @@ All file transfers generate audit entries:
 
 ---
 
+### Session Sharing (Live Watch)
+
+Admins with watch permission can observe another user's active session in real-time (read-only).
+
+#### Enable Watch Permission
+
+```toml
+# config/users.toml
+[[users]]
+name = "admin"
+can_watch_sessions = true
+watch_allowed_users = ["*"]  # "*" = all users, or specific names
+```
+
+#### Usage
+
+1. Connect to the proxy: `ssh admin@proxy-host -p 2222`
+2. At the host selection menu, enter `w`:
+   ```
+   Welcome, admin! Available hosts:
+   ─────────────────────────────────────
+     [1] web-server-01 (192.168.1.10:22)
+   ─────────────────────────────────────
+     [w] Watch active session
+   ─────────────────────────────────────
+   Select host number: w
+   ```
+3. Select a session to watch:
+   ```
+   Active sessions:
+   ─────────────────────────────────────
+     [1] user=developer target=web-server-01 (5m ago, 0 watchers)
+   ─────────────────────────────────────
+   Select session number (q to cancel): 1
+   ```
+4. You now see the session output in real-time. Press `Ctrl+C` to stop watching.
+
+#### Notes
+- Watchers are **read-only** — no input is sent to the watched session
+- Multiple admins can watch the same session simultaneously
+- All watch events are audit-logged (`session_watch_start`, `session_watch_end`)
+
+---
+
 ## 📊 Audit Logs
 
 All audit data is stored in `logs/audit.jsonl` in append-only JSON Lines format.
@@ -304,6 +351,8 @@ All audit data is stored in `logs/audit.jsonl` in append-only JSON Lines format.
 | `command_blocked` | Command rejected by filter |
 | `scp_session_start` | SCP/SFTP transfer session initiated |
 | `scp_file_transfer` | File transferred (name, size, direction) |
+| `session_watch_start` | Admin started watching a session |
+| `session_watch_end` | Admin stopped watching (with duration) |
 
 ### Example Log Entries
 
@@ -468,7 +517,7 @@ ssh_proxy/
 - [x] SCP/SFTP file transfer auditing
 - [ ] Cluster mode with load balancing
 - [ ] Real-time alerting (Slack/webhook on suspicious activity)
-- [ ] Session sharing (multiple admins watching one session)
+- [x] Session sharing (multiple admins watching one session)
 
 ---
 
