@@ -1,4 +1,4 @@
-<div align="center">
+<img width="2264" height="540" alt="image" src="https://github.com/user-attachments/assets/23d4e983-289b-4354-bd45-40627034df6a" /><div align="center">
 
 ```
     ┌─────────────────────────────────┐
@@ -331,6 +331,15 @@ watch_allowed_users = ["*"]  # "*" = all users, or specific names
 - Watchers are **read-only** — no input is sent to the watched session
 - Multiple admins can watch the same session simultaneously
 - All watch events are audit-logged (`session_watch_start`, `session_watch_end`)
+
+Demo 
+* log in to the remote server
+<img width="2264" height="540" alt="image" src="https://github.com/user-attachments/assets/2d360d5e-6a0b-4cf7-9401-de7a31609ace" />
+* then execute `ls` command
+<img width="1274" height="150" alt="image" src="https://github.com/user-attachments/assets/6e812cbb-3584-4073-ac9f-b2948f58c0d7" />
+* Duplicate the terminal and  log in to the  ssh-proxy server. We will notice a `ls` command is being executed
+<img width="1764" height="814" alt="image" src="https://github.com/user-attachments/assets/b77b5eb3-d814-4323-94a9-e4df09008673" />
+
 
 ---
 
