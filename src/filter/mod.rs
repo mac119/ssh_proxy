@@ -226,6 +226,8 @@ mod tests {
             command_filter_mode: "blacklist".into(),
             blocked_commands: vec!["rm -rf".into(), "shutdown".into(), "reboot".into()],
             allowed_commands: vec![],
+            can_watch_sessions: false,
+            watch_allowed_users: vec![],
         };
 
         let filter = CommandFilter::from_user_config(&user);
@@ -245,6 +247,8 @@ mod tests {
             command_filter_mode: "whitelist".into(),
             blocked_commands: vec![],
             allowed_commands: vec!["ls".into(), "cat".into(), "grep".into(), "ps".into()],
+            can_watch_sessions: false,
+            watch_allowed_users: vec![],
         };
 
         let filter = CommandFilter::from_user_config(&user);
@@ -264,6 +268,8 @@ mod tests {
             command_filter_mode: "blacklist".into(),
             blocked_commands: vec!["rm -rf".into()],
             allowed_commands: vec![],
+            can_watch_sessions: false,
+            watch_allowed_users: vec![],
         };
 
         let filter = CommandFilter::from_user_config(&user);
@@ -283,6 +289,8 @@ mod tests {
             command_filter_mode: "none".into(),
             blocked_commands: vec![],
             allowed_commands: vec![],
+            can_watch_sessions: false,
+            watch_allowed_users: vec![],
         };
 
         let filter = CommandFilter::from_user_config(&user);

@@ -4,3 +4,4 @@ config/host_key
 config/keys/
 TASK_SUMMARY.md
 *.tar.gz
+SESSION_SHARING_DESIGN.md
