@@ -57,6 +57,12 @@ pub struct UserEntry {
     /// Commands allowed in whitelist mode (prefix match on command name)
     #[serde(default)]
     pub allowed_commands: Vec<String>,
+    /// Whether the user can watch other users' sessions
+    #[serde(default)]
+    pub can_watch_sessions: bool,
+    /// Which users' sessions this user can watch ("*" means all)
+    #[serde(default)]
+    pub watch_allowed_users: Vec<String>,
 }
 
 fn default_filter_mode() -> String {

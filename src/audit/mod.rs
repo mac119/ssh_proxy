@@ -77,6 +77,21 @@ pub enum AuditEvent {
         size: u64,
         mode: String,
     },
+    #[serde(rename = "session_watch_start")]
+    SessionWatchStart {
+        timestamp: String,
+        watcher: String,
+        target_session_id: String,
+        target_user: String,
+        target_host: String,
+    },
+    #[serde(rename = "session_watch_end")]
+    SessionWatchEnd {
+        timestamp: String,
+        watcher: String,
+        target_session_id: String,
+        duration_secs: i64,
+    },
 }
 
 /// 审计日志记录器
@@ -246,5 +261,39 @@ impl AuditLogger {
         let dir = self.log_dir.join("sessions").join(session_id);
         let _ = fs::create_dir_all(&dir);
         dir
+    }
+
+    /// 记录观察会话开始
+    pub fn log_session_watch_start(
+        &self,
+        watcher: &str,
+        target_session_id: &str,
+        target_user: &str,
+        target_host: &str,
+    ) {
+        let event = AuditEvent::SessionWatchStart {
+            timestamp: Utc::now().to_rfc3339(),
+            watcher: watcher.to_string(),
+            target_session_id: target_session_id.to_string(),
+            target_user: target_user.to_string(),
+            target_host: target_host.to_string(),
+        };
+        self.write_event(&event);
+    }
+
+    /// 记录观察会话结束
+    pub fn log_session_watch_end(
+        &self,
+        watcher: &str,
+        target_session_id: &str,
+        duration_secs: i64,
+    ) {
+        let event = AuditEvent::SessionWatchEnd {
+            timestamp: Utc::now().to_rfc3339(),
+            watcher: watcher.to_string(),
+            target_session_id: target_session_id.to_string(),
+            duration_secs,
+        };
+        self.write_event(&event);
     }
 }

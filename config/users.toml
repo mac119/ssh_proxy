@@ -24,6 +24,9 @@ blocked_commands = [
     "poweroff",
 ]
 allowed_commands = []
+# Session watching permissions
+can_watch_sessions = true
+watch_allowed_users = ["*"]
 
 [[users]]
 name = "developer"

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -40,6 +41,14 @@ pub struct ProxyHandler {
     scp_parser: Option<Arc<Mutex<ScpParser>>>,
     /// 是否为 SCP/exec 模式的连接（非交互式）
     is_exec_mode: bool,
+    /// 是否处于观察模式（watch mode）
+    is_watch_mode: bool,
+    /// 正在观察的会话 ID
+    watching_session_id: Option<String>,
+    /// 是否在观察会话选择菜单中
+    watch_menu_state: bool,
+    /// 观察开始时间
+    watch_started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ProxyHandler {
@@ -66,6 +75,10 @@ impl ProxyHandler {
             interactive_mode: false,
             scp_parser: None,
             is_exec_mode: false,
+            is_watch_mode: false,
+            watching_session_id: None,
+            watch_menu_state: false,
+            watch_started_at: None,
         }
     }
 
@@ -114,9 +127,224 @@ impl ProxyHandler {
         }
 
         menu.push_str("─────────────────────────────────────\r\n");
+
+        // 如果用户有观察权限，显示 watch 选项
+        if self.can_user_watch(username) {
+            menu.push_str("  [w] Watch active session\r\n");
+            menu.push_str("─────────────────────────────────────\r\n");
+        }
+
         menu.push_str("Select host number: ");
 
         session.data(channel, CryptoVec::from(menu.as_bytes().to_vec()));
+    }
+
+    /// 检查用户是否有观察会话的权限
+    fn can_user_watch(&self, username: &str) -> bool {
+        self.app_config
+            .users
+            .iter()
+            .find(|u| u.name == username)
+            .map(|u| u.can_watch_sessions)
+            .unwrap_or(false)
+    }
+
+    /// 检查用户是否有权观察特定用户的会话
+    fn can_watch_target_user(&self, watcher: &str, target_user: &str) -> bool {
+        self.app_config
+            .users
+            .iter()
+            .find(|u| u.name == watcher)
+            .map(|u| {
+                u.can_watch_sessions
+                    && (u.watch_allowed_users.iter().any(|w| w == "*")
+                        || u.watch_allowed_users.contains(&target_user.to_string()))
+            })
+            .unwrap_or(false)
+    }
+
+    /// 发送活跃会话列表给用户（用于 watch 模式）
+    async fn send_watch_session_list(&self, session: &mut Session, channel: ChannelId) {
+        let sm = self.session_manager.lock().await;
+        let sessions = sm.list_sessions();
+        let username = self.username.as_deref().unwrap_or("unknown");
+
+        if sessions.is_empty() {
+            let msg = "\r\nNo active sessions to watch.\r\n\r\nSelect host number: ";
+            session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
+            return;
+        }
+
+        let mut menu = String::from("\r\nActive sessions:\r\n");
+        menu.push_str("─────────────────────────────────────\r\n");
+
+        let mut idx = 1;
+        for s in &sessions {
+            // 只要有权限就显示（允许观察同名用户的其他会话）
+            if self.can_watch_target_user(username, &s.username) {
+                let elapsed = chrono::Utc::now() - s.started_at;
+                let watchers_count = s.watchers.len();
+                menu.push_str(&format!(
+                    "  [{}] user={} target={} ({}m ago, {} watchers)\r\n",
+                    idx,
+                    s.username,
+                    s.target_host,
+                    elapsed.num_minutes(),
+                    watchers_count,
+                ));
+                idx += 1;
+            }
+        }
+
+        if idx == 1 {
+            menu.push_str("  (no watchable sessions)\r\n");
+        }
+
+        menu.push_str("─────────────────────────────────────\r\n");
+        menu.push_str("Select session number (q to cancel): ");
+
+        session.data(channel, CryptoVec::from(menu.as_bytes().to_vec()));
+    }
+
+    /// 处理观察会话选择
+    async fn handle_watch_selection(
+        &mut self,
+        session: &mut Session,
+        channel: ChannelId,
+        selection: &str,
+    ) -> bool {
+        let selection = selection.trim();
+
+        if selection == "q" || selection == "Q" {
+            self.watch_menu_state = false;
+            self.send_host_menu(session, channel).await;
+            return false;
+        }
+
+        let username = self.username.as_deref().unwrap_or("unknown").to_string();
+        let sm = self.session_manager.lock().await;
+        let sessions = sm.list_sessions();
+
+        // 过滤出可观察的会话
+        let watchable: Vec<_> = sessions
+            .iter()
+            .filter(|s| self.can_watch_target_user(&username, &s.username))
+            .collect();
+
+        let idx: usize = match selection.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= watchable.len() => n - 1,
+            _ => {
+                let msg = format!("\r\nInvalid selection: '{}'. Try again (q to cancel): ", selection);
+                session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
+                return false;
+            }
+        };
+
+        let target_session = watchable[idx];
+        let target_session_id = target_session.session_id.clone();
+        let target_user = target_session.username.clone();
+        let target_host = target_session.target_host.clone();
+
+        // 获取 broadcast receiver
+        let rx = sm.subscribe_session(&target_session_id);
+        drop(sm);
+
+        match rx {
+            Some(mut rx) => {
+                // 注册为观察者
+                let mut sm = self.session_manager.lock().await;
+                sm.add_watcher(&target_session_id, &username);
+                drop(sm);
+
+                // 记录审计
+                self.audit_logger.log_session_watch_start(
+                    &username,
+                    &target_session_id,
+                    &target_user,
+                    &target_host,
+                );
+
+                // 进入 watch mode
+                self.is_watch_mode = true;
+                self.watch_menu_state = false;
+                self.watching_session_id = Some(target_session_id.clone());
+                self.watch_started_at = Some(chrono::Utc::now());
+
+                let watch_msg = format!(
+                    "\r\n\x1b[1;36m[Watching session: {}@{} | Press Ctrl+C to stop]\x1b[0m\r\n\r\n",
+                    target_user, target_host
+                );
+                session.data(channel, CryptoVec::from(watch_msg.as_bytes().to_vec()));
+
+                // spawn 后台任务转发 broadcast 数据给观察者
+                let server_handle = session.handle();
+                let session_id_clone = target_session_id.clone();
+                let watcher_name = username.clone();
+                let audit_logger = self.audit_logger.clone();
+                let session_manager = self.session_manager.clone();
+                let watch_started = chrono::Utc::now();
+
+                tokio::spawn(async move {
+                    loop {
+                        match rx.recv().await {
+                            Ok(data) => {
+                                if let Err(_e) = server_handle
+                                    .data(channel, CryptoVec::from(data))
+                                    .await
+                                {
+                                    // 观察者断开
+                                    break;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                // 消息积压，跳过丢失的消息，继续接收
+                                let lag_msg = format!(
+                                    "\r\n\x1b[33m[Warning: skipped {} messages due to lag]\x1b[0m\r\n",
+                                    n
+                                );
+                                let _ = server_handle
+                                    .data(channel, CryptoVec::from(lag_msg.as_bytes().to_vec()))
+                                    .await;
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                // 被观察的会话已结束
+                                let end_msg = "\r\n\x1b[1;33m[Session ended]\x1b[0m\r\n";
+                                let _ = server_handle
+                                    .data(channel, CryptoVec::from(end_msg.as_bytes().to_vec()))
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+
+                    // 清理：移除观察者
+                    let mut sm = session_manager.lock().await;
+                    sm.remove_watcher(&session_id_clone, &watcher_name);
+                    drop(sm);
+
+                    // 记录审计
+                    let duration = chrono::Utc::now() - watch_started;
+                    audit_logger.log_session_watch_end(
+                        &watcher_name,
+                        &session_id_clone,
+                        duration.num_seconds(),
+                    );
+
+                    info!(
+                        "Watch session ended: watcher='{}', session='{}'",
+                        watcher_name, session_id_clone
+                    );
+                });
+
+                true
+            }
+            None => {
+                let msg = "\r\nSession no longer available.\r\n\r\nSelect host number: ";
+                session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
+                self.watch_menu_state = false;
+                false
+            }
+        }
     }
 
     /// 处理目标主机选择
@@ -126,6 +354,22 @@ impl ProxyHandler {
         channel: ChannelId,
         selection: &str,
     ) -> bool {
+        let selection = selection.trim();
+
+        // 处理 watch 命令
+        if selection == "w" || selection == "W" {
+            let username = self.username.as_deref().unwrap_or("unknown");
+            if self.can_user_watch(username) {
+                self.watch_menu_state = true;
+                self.send_watch_session_list(session, channel).await;
+                return false;
+            } else {
+                let msg = "\r\nPermission denied: you cannot watch sessions.\r\n\r\nSelect host number: ";
+                session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
+                return false;
+            }
+        }
+
         let username = self.username.as_deref().unwrap_or("unknown");
         let allowed_hosts = self.authenticator.get_allowed_hosts(username);
 
@@ -137,7 +381,6 @@ impl ProxyHandler {
             .filter(|h| allowed_hosts.contains(&"*".to_string()) || allowed_hosts.contains(&h.name))
             .collect();
 
-        let selection = selection.trim();
         let idx: usize = match selection.parse::<usize>() {
             Ok(n) if n >= 1 && n <= available.len() => n - 1,
             _ => {
@@ -184,12 +427,12 @@ impl ProxyHandler {
                 self.proxy_session = Some(proxy_session.clone());
                 self.connected_to_target = true;
 
-                // 注册会话
+                // 注册会话并获取 broadcast sender
                 let mut sm = self.session_manager.lock().await;
-                sm.add_session(&session_id, username, &target_host.name);
+                let output_tx = sm.add_session(&session_id, username, &target_host.name);
                 drop(sm);
 
-                // 启动后台任务：从目标主机读取数据并转发给用户
+                // 启动后台任务：从目标主机读取数据并转发给用户 + 广播
                 let server_handle = session.handle();
                 let audit_logger = self.audit_logger.clone();
                 let sid = session_id.clone();
@@ -198,6 +441,11 @@ impl ProxyHandler {
                     while let Some(data) = data_rx.recv().await {
                         // 记录输出到审计日志
                         audit_logger.log_data(&sid, "output", &data);
+
+                        // 广播给所有观察者（忽略无接收者的错误）
+                        if let Some(ref tx) = output_tx {
+                            let _ = tx.send(data.clone());
+                        }
 
                         // 转发数据给用户
                         if let Err(e) = server_handle
@@ -702,6 +950,29 @@ impl Handler for ProxyHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // 观察模式下：只响应 Ctrl+C 退出
+        if self.is_watch_mode {
+            for &byte in data {
+                if byte == 3 {
+                    // Ctrl+C: 退出观察模式
+                    info!("Watcher '{}' pressed Ctrl+C, stopping watch", 
+                        self.username.as_deref().unwrap_or("unknown"));
+                    self.is_watch_mode = false;
+                    self.watching_session_id = None;
+                    self.watch_started_at = None;
+
+                    let msg = "\r\n\x1b[1;36m[Watch session stopped]\x1b[0m\r\n";
+                    session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
+
+                    // 返回主菜单
+                    self.send_host_menu(session, channel).await;
+                    return Ok(());
+                }
+            }
+            // 观察模式下忽略其他输入
+            return Ok(());
+        }
+
         if self.connected_to_target {
             if self.is_exec_mode {
                 // SCP/exec 模式：直接转发，但对上传方向做解析
@@ -749,7 +1020,13 @@ impl Handler for ProxyHandler {
                         let input = self.input_buffer.clone();
                         self.input_buffer.clear();
                         session.data(channel, CryptoVec::from(b"\r\n".to_vec()));
-                        self.handle_host_selection(session, channel, &input).await;
+
+                        if self.watch_menu_state {
+                            // 在观察会话选择菜单中
+                            self.handle_watch_selection(session, channel, &input).await;
+                        } else {
+                            self.handle_host_selection(session, channel, &input).await;
+                        }
                     }
                     127 | 8 => {
                         // Backspace
@@ -760,8 +1037,15 @@ impl Handler for ProxyHandler {
                     }
                     3 => {
                         // Ctrl+C
-                        info!("User pressed Ctrl+C during host selection");
-                        session.close(channel);
+                        if self.watch_menu_state {
+                            // 在 watch 菜单中按 Ctrl+C 返回主菜单
+                            self.watch_menu_state = false;
+                            self.input_buffer.clear();
+                            self.send_host_menu(session, channel).await;
+                        } else {
+                            info!("User pressed Ctrl+C during host selection");
+                            session.close(channel);
+                        }
                     }
                     _ => {
                         self.input_buffer.push(byte as char);
@@ -781,6 +1065,29 @@ impl Handler for ProxyHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         info!("Channel closed for user '{:?}'", self.username);
+
+        // 如果是观察者断开
+        if self.is_watch_mode {
+            if let (Some(session_id), Some(username)) = (&self.watching_session_id, &self.username) {
+                let mut sm = self.session_manager.lock().await;
+                sm.remove_watcher(session_id, username);
+                drop(sm);
+
+                // 记录审计
+                if let Some(started) = self.watch_started_at {
+                    let duration = chrono::Utc::now() - started;
+                    self.audit_logger.log_session_watch_end(
+                        username,
+                        session_id,
+                        duration.num_seconds(),
+                    );
+                }
+            }
+            self.is_watch_mode = false;
+            self.watching_session_id = None;
+            self.watch_started_at = None;
+            return Ok(());
+        }
 
         if let Some(proxy_session) = self.proxy_session.take() {
             let ps = proxy_session.lock().await;
@@ -825,5 +1132,149 @@ impl Handler for ProxyHandler {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        AppConfig, AuditConfig, HostEntry, SecurityConfig, ServerConfig, SessionConfig, UserEntry,
+    };
+
+    fn make_test_config() -> Arc<AppConfig> {
+        Arc::new(AppConfig {
+            server: ServerConfig {
+                listen_address: "127.0.0.1".into(),
+                listen_port: 2222,
+                host_key_path: "config/host_key".into(),
+            },
+            session: SessionConfig {
+                idle_timeout_secs: 300,
+                max_sessions: 10,
+            },
+            audit: AuditConfig {
+                log_dir: "logs".into(),
+                record_session: true,
+            },
+            security: SecurityConfig {
+                max_auth_attempts: 3,
+                lockout_duration_secs: 300,
+            },
+            users: vec![
+                UserEntry {
+                    name: "admin".into(),
+                    password_hash: "".into(),
+                    public_keys: vec![],
+                    allowed_hosts: vec!["*".into()],
+                    command_filter_mode: "none".into(),
+                    blocked_commands: vec![],
+                    allowed_commands: vec![],
+                    can_watch_sessions: true,
+                    watch_allowed_users: vec!["*".into()],
+                },
+                UserEntry {
+                    name: "ops".into(),
+                    password_hash: "".into(),
+                    public_keys: vec![],
+                    allowed_hosts: vec!["web-server-01".into()],
+                    command_filter_mode: "none".into(),
+                    blocked_commands: vec![],
+                    allowed_commands: vec![],
+                    can_watch_sessions: true,
+                    watch_allowed_users: vec!["developer".into()],
+                },
+                UserEntry {
+                    name: "developer".into(),
+                    password_hash: "".into(),
+                    public_keys: vec![],
+                    allowed_hosts: vec!["web-server-01".into()],
+                    command_filter_mode: "none".into(),
+                    blocked_commands: vec![],
+                    allowed_commands: vec![],
+                    can_watch_sessions: false,
+                    watch_allowed_users: vec![],
+                },
+            ],
+            hosts: vec![HostEntry {
+                name: "web-server-01".into(),
+                address: "192.168.1.10".into(),
+                port: 22,
+                username: "deploy".into(),
+                auth_method: "password".into(),
+                private_key_path: None,
+                password: Some("test".into()),
+            }],
+        })
+    }
+
+    fn make_handler_with_user(config: Arc<AppConfig>, username: &str) -> ProxyHandler {
+        let authenticator = Arc::new(crate::auth::Authenticator::new(
+            config.users.clone(),
+            &config.security,
+        ));
+        let session_manager = Arc::new(Mutex::new(SessionManager::new(10)));
+        let audit_logger = Arc::new(AuditLogger::new("logs").unwrap());
+
+        let mut handler = ProxyHandler::new(
+            "127.0.0.1:12345".into(),
+            authenticator,
+            session_manager,
+            audit_logger,
+            config,
+        );
+        handler.username = Some(username.to_string());
+        handler
+    }
+
+    #[test]
+    fn test_can_user_watch_admin() {
+        let config = make_test_config();
+        let handler = make_handler_with_user(config.clone(), "admin");
+        assert!(handler.can_user_watch("admin"));
+    }
+
+    #[test]
+    fn test_can_user_watch_developer_denied() {
+        let config = make_test_config();
+        let handler = make_handler_with_user(config.clone(), "developer");
+        assert!(!handler.can_user_watch("developer"));
+    }
+
+    #[test]
+    fn test_can_watch_target_user_admin_wildcard() {
+        let config = make_test_config();
+        let handler = make_handler_with_user(config.clone(), "admin");
+        // admin can watch everyone (wildcard "*")
+        assert!(handler.can_watch_target_user("admin", "developer"));
+        assert!(handler.can_watch_target_user("admin", "ops"));
+        assert!(handler.can_watch_target_user("admin", "anyone"));
+    }
+
+    #[test]
+    fn test_can_watch_target_user_ops_restricted() {
+        let config = make_test_config();
+        let handler = make_handler_with_user(config.clone(), "ops");
+        // ops can only watch "developer"
+        assert!(handler.can_watch_target_user("ops", "developer"));
+        assert!(!handler.can_watch_target_user("ops", "admin"));
+        assert!(!handler.can_watch_target_user("ops", "other"));
+    }
+
+    #[test]
+    fn test_can_watch_target_user_developer_denied() {
+        let config = make_test_config();
+        let handler = make_handler_with_user(config.clone(), "developer");
+        // developer cannot watch anyone
+        assert!(!handler.can_watch_target_user("developer", "admin"));
+        assert!(!handler.can_watch_target_user("developer", "ops"));
+    }
+
+    #[test]
+    fn test_can_watch_unknown_user() {
+        let config = make_test_config();
+        let handler = make_handler_with_user(config.clone(), "unknown");
+        assert!(!handler.can_user_watch("unknown"));
+        assert!(!handler.can_watch_target_user("unknown", "admin"));
     }
 }
